@@ -4,7 +4,7 @@ A tool for scaling pixel art and sprites with advanced palette management and tr
 Usage:
 - Load files: gif(s), or png's
 - Select transparency color if needed (to prevent bleeding)
-- Enter a resize and percentage Pick MagicKernelSharp2021
+- Enter a resize percentage and Pick MagicKernelSharp2021
 - Press 'Apply Scale'
 - You can optionally load a palette to each: loaded images and scaled images.
 - Press 'Save scaled image' to save as gif or loose png's
