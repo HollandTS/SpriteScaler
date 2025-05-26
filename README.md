@@ -1,21 +1,57 @@
 # SpriteScaler
-A tool for scaling pixel art and sprites with advanced palette management and transparency handling
+A tool to upscale, outline, and recolor pixel art or sprites with precision. It combines advanced scaling algorithms, flexible outlining, and intuitive color adjustment to help you polish and perfect your sprites 
 
-Usage:
-- Load files: gif(s), or png's
-- Select transparency color if needed (to prevent bleeding)
-- Enter a resize percentage and Pick MagicKernelSharp2021
-- Press 'Apply Scale'
-- You can optionally load a palette to each: loaded images and scaled images.
-- Press 'Save scaled image' to save as gif or loose png's
+## How to Use Sprite Scaler
+Prepare Your Sprites
 
-Includes the new 'MagicKernel'  resizer, which is perfect for resizing like 80% or 125%:
+For best results, first cut up your sprite sheet into individual frames or images. This allows for more precise scaling and editing.
+Load Your Files
 
-![sprite_scaler_gif_1](https://github.com/user-attachments/assets/843f9abe-dbd8-4590-8f28-4e421b899d6e)
+Click the "Load File(s)" button to import one or more sprite images (PNG, GIF, etc).
 
-Apply an optional palette: browse image to pick the closest colors  (handy for recoloring)
+### Set Transparency
+Use the "Transparency Color" button to pick the color that should be treated as transparent in your sprites.
+The "View Color" checkbox lets you toggle the display of the transparency color in the preview.
 
-![sprite_scaler_gif_2](https://github.com/user-attachments/assets/eef93bb5-ef67-40f0-a5c3-d787260fecb1)
+### Preview and Background
+The preview area shows your current sprite. You can set a custom background image for better visualization.
+
+### Scaling
+Choose a scaling filter (Lanczos, Magic Kernel, Nearest Neighbor, Bicubic Sharper) and set your desired scale percentage.
+Click "Apply Scale" to upscale or downscale your sprite.
+
+### Outlining
+Enable outlining to add a border around your sprite. You can customize outline color(s), thickness, direction, and use gradients for advanced effects.
+
+### Change Color
+Use the "Pick color" button to select a color from your sprite.
+Adjust the color using the sliders for tolerance, hue, saturation, brightness, sharpness, and contrast.
+Tip: Increasing the sharpness can help with color tolerance, making color replacement more precise.
+Apply changes to the current frame or all frames.
+
+### Undo/Redo
+All major actions (scaling, outlining, color changes) support undo/redo for easy experimentation.
+
+### Save
+Choose your output folder and save the processed images.
+
+
+## Why Use Sprite Scaler?
+This unique combination of advanced scaling, flexible outlining, and powerful color adjustment gives you full control to polish your sprites—making them crisp, vibrant, and ready for any game or animation project.
+
+## Previews:
+
+Quick color change:
+
+![change color_powerfull](https://github.com/user-attachments/assets/ae1c041a-2fd9-43c5-b311-d807a38b56cb)
+
+
+Outlining:
+![outlining](https://github.com/user-attachments/assets/b66cbc5e-26ad-436d-b4b8-f45bc9607af8)
+
+Quick touch-up:
+
+![final_touchup](https://github.com/user-attachments/assets/453e47c2-0f4d-42f4-8eab-9e0569889cc0)
 
 
 ## Requirements
