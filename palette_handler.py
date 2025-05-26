@@ -6,6 +6,103 @@ import colorsys
 from skimage import color
 
 class PaletteHandler:
+    def adjust_hsv_in_image(self, img, target_color, tolerance=30, hue_shift=0.0, sat_shift=0.0, bri_shift=0.0, sharpness=1.0, contrast=0.0):
+        """Shift hue/saturation/brightness/contrast/sharpness of all pixels within tolerance of target_color, vectorized for performance.
+        Transparency color (if set) is always preserved and not altered.
+        Sharpness and contrast only affect the selected color region (tolerance mask)."""
+        import numpy as np
+        from PIL import Image
+        arr = np.array(img.convert('RGBA'))
+        r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+        # Convert image and target color to HSV
+        rgb_img = np.stack([r, g, b], axis=-1).astype(np.float32) / 255.0
+        hsv_img = color.rgb2hsv(rgb_img)
+        tr, tg, tb = target_color
+        target_rgb = np.array([[tr / 255.0, tg / 255.0, tb / 255.0]])
+        target_hsv = color.rgb2hsv(target_rgb)[0]
+        # Compute hue distance (circular)
+        hue_img = hsv_img[..., 0] * 360.0
+        target_hue = target_hsv[0] * 360.0
+        hue_dist = np.abs(hue_img - target_hue)
+        hue_dist = np.minimum(hue_dist, 360.0 - hue_dist)  # wraparound
+        # Optionally, also check S/V distance (less important, but helps with edge cases)
+        sat_img = hsv_img[..., 1]
+        val_img = hsv_img[..., 2]
+        sat_dist = np.abs(sat_img - target_hsv[1])
+        val_dist = np.abs(val_img - target_hsv[2])
+        # Main mask: within hue tolerance (tolerance is in degrees, 0-1000 maps to 0-180)
+        hue_tol = np.clip(tolerance, 0, 1000) * 0.18  # 0-180 degrees
+        mask = (hue_dist <= hue_tol) & (sat_dist < 0.4) & (val_dist < 0.4)
+        # If a transparency color is set, exclude those pixels from the mask
+        transparency_color = getattr(self, 'transparency_color', None)
+        if transparency_color is not None:
+            tcr, tcg, tcb = transparency_color
+            transparency_mask = (r == tcr) & (g == tcg) & (b == tcb)
+            mask = mask & (~transparency_mask)
+        # Flatten mask and indices for masked pixels
+        idxs = np.where(mask)
+        if idxs[0].size == 0:
+            return Image.fromarray(arr)
+        # Extract masked RGB pixels and normalize
+        rgb_masked = np.stack([r[idxs], g[idxs], b[idxs]], axis=1) / 255.0
+        # Convert RGB to HSV (vectorized)
+        import colorsys
+        def rgb_to_hsv_vec(rgb):
+            return np.array([colorsys.rgb_to_hsv(*pix) for pix in rgb])
+        def hsv_to_rgb_vec(hsv):
+            return np.array([colorsys.hsv_to_rgb(*pix) for pix in hsv])
+        hsv_masked = rgb_to_hsv_vec(rgb_masked)
+        # Apply shifts
+        hsv_masked[:, 0] = (hsv_masked[:, 0] + hue_shift / 360.0) % 1.0
+        hsv_masked[:, 1] = np.clip(hsv_masked[:, 1] + sat_shift, 0.0, 1.0)
+        hsv_masked[:, 2] = np.clip(hsv_masked[:, 2] + bri_shift, 0.0, 1.0)
+        # Apply contrast to value channel ([-1,1], 0=no change)
+        if contrast != 0.0:
+            hsv_masked[:, 2] = np.clip((hsv_masked[:, 2] - 0.5) * (1 + contrast) + 0.5, 0.0, 1.0)
+        # Convert back to RGB
+        rgb_new = (hsv_to_rgb_vec(hsv_masked) * 255).astype(np.uint8)
+        # --- Apply sharpness to only the masked region ---
+        # Always apply sharpness, even if 1.0 (so it can be reset)
+        from PIL import ImageEnhance
+        mask_img = np.zeros(arr.shape, dtype=np.uint8)
+        mask_img[..., 0] = 0
+        mask_img[..., 1] = 0
+        mask_img[..., 2] = 0
+        mask_img[..., 3] = 0
+        mask_img[idxs[0], idxs[1], 0] = rgb_new[:, 0]
+        mask_img[idxs[0], idxs[1], 1] = rgb_new[:, 1]
+        mask_img[idxs[0], idxs[1], 2] = rgb_new[:, 2]
+        mask_img[idxs[0], idxs[1], 3] = a[idxs]
+        region_img = Image.fromarray(mask_img, mode='RGBA')
+        region_rgb = region_img.convert('RGB')
+        region_enhanced = ImageEnhance.Sharpness(region_rgb).enhance(sharpness)
+        region_enhanced = region_enhanced.convert('RGBA')
+        # Only update the masked region
+        region_arr = np.array(region_enhanced)
+        rgb_new = np.stack([
+            region_arr[idxs[0], idxs[1], 0],
+            region_arr[idxs[0], idxs[1], 1],
+            region_arr[idxs[0], idxs[1], 2]
+        ], axis=1)
+        # Update only masked pixels
+        arr[idxs[0], idxs[1], 0] = rgb_new[:, 0]
+        arr[idxs[0], idxs[1], 1] = rgb_new[:, 1]
+        arr[idxs[0], idxs[1], 2] = rgb_new[:, 2]
+        return Image.fromarray(arr)
+    def replace_color_in_image(self, img, target_color, replacement_color, tolerance=30):
+        """Replace all pixels in img close to target_color with replacement_color, within tolerance."""
+        try:
+            arr = np.array(img.convert('RGBA'))
+            r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+            tr, tg, tb = target_color
+            mask = (np.abs(r - tr) <= tolerance) & (np.abs(g - tg) <= tolerance) & (np.abs(b - tb) <= tolerance)
+            arr[..., 0][mask] = replacement_color[0]
+            arr[..., 1][mask] = replacement_color[1]
+            arr[..., 2][mask] = replacement_color[2]
+            return Image.fromarray(arr)
+        except Exception as e:
+            print(f"Error in replace_color_in_image: {e}")
+            return img
     def __init__(self):
         self.current_palette = None
         self.palette_colors = None  # numpy array of RGB colors
