@@ -98,6 +98,7 @@ python main.py
 - Frame-by-frame animation support
 - Zoom controls
 - LAB color space matching for accurate palette application
+- Powerful outlining and color adjustment tools for sprite polishing
 
 ## Troubleshooting
 
