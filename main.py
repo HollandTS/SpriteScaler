@@ -13,8 +13,18 @@ from PIL import Image, ImageDraw
 os.environ['MAGICK_HOME'] = os.path.join(os.path.dirname(__file__), 'imagemagick')
 
 # Delete old log file if it exists
-if os.path.exists('debug.log'):
-    os.remove('debug.log')
+try:
+    if os.path.exists('debug.log'):
+        os.remove('debug.log')
+except PermissionError:
+    # File may be locked by another process (e.g., an external logger); continue without failing
+    pass
+except Exception as e:
+    # Log any unexpected error and continue
+    try:
+        logging.warning(f"Could not remove debug.log: {e}")
+    except Exception:
+        pass
 
 # Setup logging
 logging.basicConfig(
@@ -58,6 +68,10 @@ class NewToolApp:
             self.bg_image_path = None  # Path to the background image for preview
             self.bg_image = None  # Store the background image (fixes AttributeError)
             self.transparency_color = None # The actual picked transparency color (RGB tuple)
+            # Color-settings undo/redo stacks (stores snapshots of color sliders used when Apply is pressed)
+            self._color_settings_undo_stack = []
+            self._color_settings_redo_stack = []
+            self.transparency_tolerance_var = tk.IntVar(value=0)
 
             # Initialize variables
             self.setup_ui()
@@ -95,7 +109,9 @@ class NewToolApp:
         file_frame.pack(fill="x", pady=(0, 5))
 
         self.load_file_button = ttk.Button(file_frame, text="Load File(s)", command=self.load_file_dialog)
-        self.load_file_button.pack(padx=5, pady=5)
+        self.load_file_button.pack(side="left", padx=5, pady=5)
+        self.unload_all_button = ttk.Button(file_frame, text="Unload all", command=self.unload_all_files)
+        self.unload_all_button.pack(side="left", padx=(0,5), pady=5)
 
 
 
@@ -114,6 +130,14 @@ class NewToolApp:
         self.view_transparency_color_var = tk.BooleanVar(value=True) # Default to True
         self.view_transparency_color_cb = ttk.Checkbutton(transparency_frame, text="View Color", variable=self.view_transparency_color_var, command=self.update_preview_with_bg)
         self.view_transparency_color_cb.pack(side="left", padx=5, pady=5)
+
+        # Transparency tolerance slider and entry
+        ttk.Label(transparency_frame, text="Tolerance:").pack(side="left", padx=(8,2))
+        self.transparency_tolerance_slider = ttk.Scale(transparency_frame, from_=0, to=255, variable=self.transparency_tolerance_var, orient=tk.HORIZONTAL, length=140, command=lambda e: self.on_transparency_tolerance_changed())
+        self.transparency_tolerance_slider.pack(side="left", padx=2, pady=5)
+        self.transparency_tolerance_entry = ttk.Entry(transparency_frame, textvariable=self.transparency_tolerance_var, width=5)
+        self.transparency_tolerance_entry.pack(side="left", padx=2)
+        self.transparency_tolerance_entry.bind('<Return>', lambda e: self.on_transparency_tolerance_changed())
 
 
         # --- Preview area (now on the left, below controls) ---
@@ -228,6 +252,10 @@ class NewToolApp:
         folder_label = ttk.Label(save_frame, textvariable=self.save_folder_label_var, width=18, anchor="w")
         folder_label.pack(side="right", padx=(0, 8))
 
+        # Settings save/load buttons
+        ttk.Button(save_frame, text="Save settings", command=self.save_settings_dialog).pack(side="left", padx=(0,8))
+        ttk.Button(save_frame, text="Load settings", command=self.load_settings_dialog).pack(side="left", padx=(0,8))
+
         ttk.Button(save_frame, text="Save Image(s)", command=self.save_scaled_image).pack(side="right")
 
         # --- Change Color Group ---
@@ -308,6 +336,11 @@ class NewToolApp:
         self.apply_color_change_button.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.reset_color_preview_button = ttk.Button(button_frame, text="Reset", command=self.reset_color_preview)
         self.reset_color_preview_button.pack(side="left", fill="x")
+        # Undo/Redo buttons for color SETTINGS (jump to settings used when Apply was pressed)
+        self.undo_color_settings_button = ttk.Button(button_frame, text="Undo Settings", command=self.undo_color_settings)
+        self.undo_color_settings_button.pack(side="left", padx=(8,4))
+        self.redo_color_settings_button = ttk.Button(button_frame, text="Redo Settings", command=self.redo_color_settings)
+        self.redo_color_settings_button.pack(side="left")
         # Checkbox: Apply to current frame only
         self.apply_to_current_frame_var = tk.BooleanVar(value=False)
         self.apply_to_current_frame_checkbox = ttk.Checkbutton(
@@ -488,8 +521,11 @@ class NewToolApp:
             messagebox.showwarning("Outlining Preview Issue", "Please set a transparency color first to define the sprite boundary for outlining.")
             return
 
-        # IMPORTANT: If outline color matches transparency color, it will be invisible regardless of background fill.
-        if tuple(color1) == tuple(transparency_color_app_wide) or (use_gradient and tuple(color2) == tuple(transparency_color_app_wide)):
+        # IMPORTANT: If outline color matches transparency color (within tolerance), it will be invisible regardless of background fill.
+        ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
+        def _within_tol(ca, cb, tol):
+            return abs(ca[0] - cb[0]) <= tol and abs(ca[1] - cb[1]) <= tol and abs(ca[2] - cb[2]) <= tol
+        if _within_tol(color1, transparency_color_app_wide, ttol) or (use_gradient and _within_tol(color2, transparency_color_app_wide, ttol)):
             self.preview_viewer.load_frames([frame.copy() for frame in self._original_preview_frames])
             self.preview_viewer.bg_image = original_preview_bg_image
             self.preview_viewer.transparency_color = original_preview_transparency_color
@@ -521,9 +557,10 @@ class NewToolApp:
         self.preview_viewer.transparency_color = None 
 
         new_frames = []
+        ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
         for frame in self._original_preview_frames:
             # Step 1: Make original transparency color transparent (alpha 0)
-            frame_for_outline = outlining.apply_transparency_color(frame, transparency_color_app_wide)
+            frame_for_outline = outlining.apply_transparency_color(frame, transparency_color_app_wide, ttol)
             
             # Step 2: Pad the image with a transparent border
             padded = outlining.pad_image_with_transparent_border(frame_for_outline, border=2)
@@ -642,7 +679,8 @@ class NewToolApp:
             # If the preview frames have the transparency color filled in, convert it to alpha 0 for display
             if update_frames and hasattr(self, '_original_preview_frames') and self._original_preview_frames and self.transparency_color is not None:
                 from outlining import apply_transparency_color
-                frames = [apply_transparency_color(frame, self.transparency_color) for frame in self._original_preview_frames]
+                ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
+                frames = [apply_transparency_color(frame, self.transparency_color, ttol) for frame in self._original_preview_frames]
                 self.preview_viewer.load_frames([frame.copy() for frame in frames])
         self.preview_viewer.current_frame_index = cur_idx
         self.preview_viewer.zoom = cur_zoom
@@ -729,13 +767,21 @@ class NewToolApp:
                 base_frames[cur_idx], self.picked_color, input_tolerance, hue_shift, sat_shift, bri_shift, sharpness, contrast
             )
             if transparency_color_palette is not None:
-                new_img = apply_transparency_color(new_img, transparency_color_palette)
+                ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
+                new_img = apply_transparency_color(new_img, transparency_color_palette, ttol)
             new_frames[cur_idx] = new_img
             self.preview_viewer.load_frames(new_frames)
             self._original_preview_frames = [frame.copy() for frame in new_frames]
             # Restore frame index
             self.preview_viewer.current_frame_index = cur_idx
             self.preview_viewer.update_frame_display()
+            # Push settings snapshot for Undo/Redo Settings
+            try:
+                snap = self._snapshot_color_settings()
+                self._color_settings_undo_stack.append(snap)
+                self._color_settings_redo_stack.clear()
+            except Exception:
+                pass
             # Reset sliders after apply
             self.input_tolerance_var.set(30)
             self.hue_var.set(0.0)
@@ -773,7 +819,8 @@ class NewToolApp:
                     frame, self.picked_color, input_tolerance, hue_shift, sat_shift, bri_shift, sharpness, contrast
                 )
                 if transparency_color_palette is not None:
-                    new_img = apply_transparency_color(new_img, transparency_color_palette)
+                    ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
+                    new_img = apply_transparency_color(new_img, transparency_color_palette, ttol)
                 new_frames.append(new_img)
                 progress_var.set(f"{i+1} / {total}")
             def on_done():
@@ -789,6 +836,13 @@ class NewToolApp:
                 # Restore frame index
                 self.preview_viewer.current_frame_index = cur_idx if 0 <= cur_idx < len(new_frames) else 0
                 self.preview_viewer.update_frame_display()
+                # Push settings snapshot for Undo/Redo Settings
+                try:
+                    snap = self._snapshot_color_settings()
+                    self._color_settings_undo_stack.append(snap)
+                    self._color_settings_redo_stack.clear()
+                except Exception:
+                    pass
                 # Reset sliders after apply
                 self.input_tolerance_var.set(30)
                 self.hue_var.set(0.0)
@@ -812,6 +866,35 @@ class NewToolApp:
         # Restore frame index if possible
         if hasattr(self.preview_viewer, 'current_frame_index') and self.preview_viewer.current_frame_index < len(prev_frames):
             self.preview_viewer.update_frame_display()
+
+    def undo_color_settings(self):
+        """Restore previous color SETTINGS snapshot (does not change image pixels directly)."""
+        if not self._color_settings_undo_stack:
+            messagebox.showinfo("Undo Settings", "Nothing to undo in color settings.")
+            return
+        try:
+            # Pop last applied snapshot and move current settings to redo stack
+            snap = self._color_settings_undo_stack.pop()
+            current_snap = self._snapshot_color_settings()
+            self._color_settings_redo_stack.append(current_snap)
+            # Apply popped snapshot
+            self._apply_color_settings_snapshot(snap)
+            messagebox.showinfo("Undo Settings", "Color settings restored.")
+        except Exception as e:
+            logging.error(f"Error undoing color settings: {e}")
+
+    def redo_color_settings(self):
+        if not self._color_settings_redo_stack:
+            messagebox.showinfo("Redo Settings", "Nothing to redo in color settings.")
+            return
+        try:
+            snap = self._color_settings_redo_stack.pop()
+            current_snap = self._snapshot_color_settings()
+            self._color_settings_undo_stack.append(current_snap)
+            self._apply_color_settings_snapshot(snap)
+            messagebox.showinfo("Redo Settings", "Color settings re-applied.")
+        except Exception as e:
+            logging.error(f"Error redoing color settings: {e}")
 
     def redo_color_apply(self):
         if not self._color_edit_redo_stack:
@@ -848,11 +931,12 @@ class NewToolApp:
                 self._original_preview_frames[cur_idx],
                 self.picked_color, input_tolerance, hue_shift, sat_shift, bri_shift, sharpness, contrast
             )
-            # Apply transparency color to preview
+            # Apply transparency color to preview (respect tolerance)
             from outlining import apply_transparency_color
             transparency_color_palette = getattr(self.palette_handler, 'transparency_color', None)
             if transparency_color_palette is not None:
-                new_img = apply_transparency_color(new_img, transparency_color_palette)
+                ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
+                new_img = apply_transparency_color(new_img, transparency_color_palette, ttol)
             new_frames[cur_idx] = new_img
         self.preview_viewer.load_frames(new_frames)
         # Restore frame index and zoom
@@ -872,6 +956,37 @@ class NewToolApp:
         # Only reset the color preview: restore preview to the original preview frames
         if hasattr(self, '_original_preview_frames'):
             self.preview_viewer.load_frames([frame.copy() for frame in self._original_preview_frames])
+
+    def _snapshot_color_settings(self):
+        """Create a serializable snapshot of current color settings."""
+        return {
+            'picked_color': list(self.picked_color) if self.picked_color else None,
+            'input_tolerance': int(self.input_tolerance_var.get()),
+            'hue': float(self.hue_var.get()),
+            'saturation': float(self.sat_var.get()),
+            'brightness': float(self.bri_var.get()),
+            'sharpness': float(self.sharpness_var.get()),
+            'contrast': float(self.contrast_var.get())
+        }
+
+    def _apply_color_settings_snapshot(self, snap):
+        if not isinstance(snap, dict):
+            return
+        try:
+            picked = snap.get('picked_color')
+            if picked:
+                self.picked_color = tuple(picked)
+                self.picked_color_canvas.config(bg='#%02x%02x%02x' % tuple(picked))
+            self.input_tolerance_var.set(int(snap.get('input_tolerance', 30)))
+            self.hue_var.set(float(snap.get('hue', 0.0)))
+            self.sat_var.set(float(snap.get('saturation', 0.0)))
+            self.bri_var.set(float(snap.get('brightness', 0.0)))
+            self.sharpness_var.set(float(snap.get('sharpness', 1.0)))
+            self.contrast_var.set(float(snap.get('contrast', 0.0)))
+            # Refresh live preview to reflect these settings
+            self.update_live_color_preview()
+        except Exception as e:
+            logging.error(f"Error applying color settings snapshot: {e}")
 
     def load_file_dialog(self):
         """Open dialog to select image file(s) and load them into the preview viewer only, preserving original filenames."""
@@ -904,10 +1019,25 @@ class NewToolApp:
                         else:
                             all_paths.append(file_path)
                 if all_frames:
-                    self.preview_viewer.load_frames([frame.copy() for frame in all_frames])
-                    self.preview_viewer.set_image_paths(list(all_paths))
-                    self._original_preview_frames = [frame.copy() for frame in all_frames]
-                    self._original_filenames = list(all_paths)  # Save for later use in saving
+                    # Append to existing frames if any (Load more behavior)
+                    if hasattr(self.preview_viewer, 'frames') and self.preview_viewer.frames:
+                        existing_frames = [frame.copy() for frame in self.preview_viewer.frames]
+                        existing_paths = self.preview_viewer.get_image_paths() if hasattr(self.preview_viewer, 'get_image_paths') else [None] * len(existing_frames)
+                        combined_frames = existing_frames + [frame.copy() for frame in all_frames]
+                        combined_paths = list(existing_paths) + list(all_paths)
+                        self.preview_viewer.load_frames(combined_frames)
+                        self.preview_viewer.set_image_paths(combined_paths)
+                        # Update originals lists
+                        self._original_preview_frames = [frame.copy() for frame in combined_frames]
+                        if hasattr(self, '_original_filenames') and isinstance(self._original_filenames, list):
+                            self._original_filenames.extend(list(all_paths))
+                        else:
+                            self._original_filenames = list(existing_paths) + list(all_paths)
+                    else:
+                        self.preview_viewer.load_frames([frame.copy() for frame in all_frames])
+                        self.preview_viewer.set_image_paths(list(all_paths))
+                        self._original_preview_frames = [frame.copy() for frame in all_frames]
+                        self._original_filenames = list(all_paths)  # Save for later use in saving
 
                     # Clear all undo/redo histories when new files are loaded
                     self._color_edit_undo_stack.clear()
@@ -916,6 +1046,12 @@ class NewToolApp:
                     self._scale_redo_stack.clear()
                     self._outline_undo_stack.clear()
                     self._outline_redo_stack.clear()
+
+                    # Change the load button label to indicate loading more is possible
+                    try:
+                        self.load_file_button.config(text='Load more')
+                    except Exception:
+                        pass
 
                     self.preview_refresh_btn.invoke()  # Simulate refresh button press
                     logging.info(f"Loaded {len(all_frames)} frames from {len(file_paths)} files")
@@ -1000,11 +1136,134 @@ class NewToolApp:
                 config["images"] = self.preview_viewer.get_image_paths()
             if getattr(self, 'bg_image_path', None):
                 config["bg_image_path"] = self.bg_image_path
+            # Save transparency tolerance setting (if present)
+            try:
+                config["transparency_tolerance"] = int(self.transparency_tolerance_var.get())
+            except Exception:
+                config["transparency_tolerance"] = 0
             with open("config.json", "w") as f:
                 json.dump(config, f, indent=4)
             logging.info(f"Config saved. Images: {len(config.get('images', []))} BG image: {config.get('bg_image_path')}")
         except Exception as e:
             logging.error(f"Error saving config: {e}", exc_info=True)
+
+    def save_settings_dialog(self):
+        """Ask user where to save current settings and write them as JSON."""
+        try:
+            file_path = filedialog.asksaveasfilename(title="Save Settings", defaultextension='.json', filetypes=[('JSON files','*.json')])
+            if not file_path:
+                return
+            settings = {
+                'change_color': {
+                    'picked_color': list(self.picked_color) if self.picked_color else None,
+                    'input_tolerance': int(self.input_tolerance_var.get()),
+                    'hue': float(self.hue_var.get()),
+                    'saturation': float(self.sat_var.get()),
+                    'brightness': float(self.bri_var.get()),
+                    'sharpness': float(self.sharpness_var.get()),
+                    'contrast': float(self.contrast_var.get())
+                },
+                'scale': {
+                    'scale_percent': self.scale_var.get(),
+                    'filter': self.filter_var.get()
+                },
+                'outlining': {
+                    'enabled': bool(self.outline_enabled_var.get()),
+                    'color1': list(self.outline_color1) if hasattr(self, 'outline_color1') else None,
+                    'color2': list(self.outline_color2) if hasattr(self, 'outline_color2') else None,
+                    'use_gradient': bool(self.outline_use_gradient_var.get()),
+                    'direction': self.outline_direction_var.get(),
+                    'amount': int(self.outline_amount_var.get()),
+                    'thickness': int(self.outline_thickness_var.get()),
+                    'side': self.outline_side_var.get() if hasattr(self, 'outline_side_var') else 'outside'
+                },
+                'transparency': {
+                    'transparency_color': list(self.transparency_color) if getattr(self, 'transparency_color', None) else None,
+                    'transparency_tolerance': int(getattr(self.palette_handler, 'transparency_tolerance', 0))
+                }
+            }
+            with open(file_path, 'w') as f:
+                json.dump(settings, f, indent=4)
+            messagebox.showinfo("Save settings", f"Settings saved to {file_path}")
+        except Exception as e:
+            logging.error(f"Error saving settings: {e}")
+            messagebox.showerror("Error", f"Failed to save settings: {e}")
+
+    def load_settings_dialog(self):
+        """Load settings from a JSON file and apply to UI controls."""
+        try:
+            file_path = filedialog.askopenfilename(title="Load Settings", filetypes=[('JSON files','*.json')])
+            if not file_path or not os.path.exists(file_path):
+                return
+            with open(file_path, 'r') as f:
+                settings = json.load(f)
+            # Apply change color settings
+            cc = settings.get('change_color', {})
+            picked = cc.get('picked_color')
+            if picked:
+                self.picked_color = tuple(picked)
+                self.picked_color_canvas.config(bg='#%02x%02x%02x' % tuple(picked))
+            self.input_tolerance_var.set(int(cc.get('input_tolerance', self.input_tolerance_var.get())))
+            self.hue_var.set(float(cc.get('hue', self.hue_var.get())))
+            self.sat_var.set(float(cc.get('saturation', self.sat_var.get())))
+            self.bri_var.set(float(cc.get('brightness', self.bri_var.get())))
+            self.sharpness_var.set(float(cc.get('sharpness', self.sharpness_var.get())))
+            self.contrast_var.set(float(cc.get('contrast', self.contrast_var.get())))
+            # Apply scale settings
+            sc = settings.get('scale', {})
+            if 'scale_percent' in sc:
+                try:
+                    self.scale_var.set(str(sc.get('scale_percent')))
+                except Exception:
+                    pass
+            if 'filter' in sc:
+                try:
+                    self.filter_var.set(sc.get('filter'))
+                except Exception:
+                    pass
+            # Apply outlining settings
+            ol = settings.get('outlining', {})
+            try:
+                if 'enabled' in ol:
+                    self.outline_enabled_var.set(bool(ol.get('enabled')))
+                if 'color1' in ol and ol.get('color1'):
+                    self.outline_color1 = tuple(ol.get('color1'))
+                    self.update_outline_color_canvas(1)
+                if 'color2' in ol and ol.get('color2'):
+                    self.outline_color2 = tuple(ol.get('color2'))
+                    self.update_outline_color_canvas(2)
+                if 'use_gradient' in ol:
+                    self.outline_use_gradient_var.set(bool(ol.get('use_gradient')))
+                if 'direction' in ol:
+                    self.outline_direction_var.set(ol.get('direction'))
+                if 'amount' in ol:
+                    self.outline_amount_var.set(int(ol.get('amount')))
+                if 'thickness' in ol:
+                    self.outline_thickness_var.set(int(ol.get('thickness')))
+                if 'side' in ol:
+                    self.outline_side_var.set(ol.get('side'))
+            except Exception:
+                logging.warning("Some outlining settings failed to apply")
+            # Transparency settings
+            tr = settings.get('transparency', {})
+            if tr.get('transparency_color'):
+                self.transparency_color = tuple(tr.get('transparency_color'))
+                self.color_indicator.config(bg='#%02x%02x%02x' % tuple(self.transparency_color))
+                self.palette_handler.set_transparency_color(self.transparency_color)
+            if 'transparency_tolerance' in tr:
+                try:
+                    val = int(tr.get('transparency_tolerance', 0))
+                    self.transparency_tolerance_var.set(val)
+                    self.palette_handler.transparency_tolerance = val
+                except Exception:
+                    pass
+            # Refresh previews
+            self.update_live_color_preview()
+            self.update_live_outline_preview()
+            messagebox.showinfo("Load settings", f"Settings loaded from {file_path}")
+        except Exception as e:
+            logging.error(f"Error loading settings: {e}")
+            messagebox.showerror("Error", f"Failed to load settings: {e}")
 
     def load_config(self):
         try:
@@ -1029,6 +1288,13 @@ class NewToolApp:
                     else:
                         self.bg_image = None
                         self.bg_image_path = None
+                    # Restore transparency tolerance if present
+                    try:
+                        tt = int(config_data.get("transparency_tolerance", 0))
+                        self.transparency_tolerance_var.set(tt)
+                        self.palette_handler.transparency_tolerance = tt
+                    except Exception:
+                        pass
                     return config_data
             # If no config or missing images, clear bg image
             self.bg_image = None
@@ -1089,6 +1355,11 @@ class NewToolApp:
         hex_color = '#{:02x}{:02x}{:02x}'.format(*color)
         self.color_indicator.config(bg=hex_color)
         self.palette_handler.set_transparency_color(color)
+        # Ensure palette handler has the current tolerance
+        try:
+            self.palette_handler.transparency_tolerance = int(self.transparency_tolerance_var.get())
+        except Exception:
+            self.palette_handler.transparency_tolerance = 0
         self.transparency_color = color  # Store the picked transparency color
         print(f"Set transparency color to {hex_color}")
         # Notify outlining logic of transparency color change
@@ -1104,6 +1375,49 @@ class NewToolApp:
                 self.preview_viewer.current_frame_index = cur_idx
         self.update_preview_with_bg() # This will now display transparency by default
         self.stop_color_picking_mode()
+
+    def unload_all_files(self):
+        """Remove all loaded files from the app and reset related state."""
+        # Clear preview frames and image paths
+        try:
+            self.preview_viewer.load_frames([])
+            if hasattr(self.preview_viewer, 'set_image_paths'):
+                self.preview_viewer.set_image_paths([])
+        except Exception:
+            pass
+        # Clear stored originals and undo/redo stacks
+        self._original_preview_frames = []
+        self._original_filenames = []
+        self._color_edit_undo_stack.clear()
+        self._color_edit_redo_stack.clear()
+        self._scale_undo_stack.clear()
+        self._scale_redo_stack.clear()
+        self._outline_undo_stack.clear()
+        self._outline_redo_stack.clear()
+        # Reset load button label
+        try:
+            self.load_file_button.config(text='Load File(s)')
+        except Exception:
+            pass
+        logging.info("All files unloaded from preview.")
+        # Refresh preview background state
+        try:
+            self.update_preview_with_bg()
+        except Exception:
+            pass
+
+    def on_transparency_tolerance_changed(self, *_):
+        """Called when the transparency tolerance UI control changes."""
+        try:
+            tol = int(self.transparency_tolerance_var.get())
+        except Exception:
+            tol = 0
+            self.transparency_tolerance_var.set(0)
+        # Store in palette handler and refresh UI
+        self.palette_handler.transparency_tolerance = tol
+        if hasattr(outlining, 'on_transparency_color_changed'):
+            outlining.on_transparency_color_changed(self)
+        self.update_preview_with_bg()
 
     def update_frame_viewer(self):
         # No-op: frame_viewer removed
@@ -1247,18 +1561,37 @@ class NewToolApp:
                 logging.info(f"Animated GIF saved to: {gif_path}")
                 return
 
-            # Otherwise, save each frame as a separate file with original filename and extension (no _scaled, no renaming)
+            # Prepare duplicate-name handling: determine basenames and counts
+            from collections import Counter
+            basename_keys = []
+            for p in original_paths:
+                if p is None:
+                    basename_keys.append(None)
+                elif isinstance(p, tuple):
+                    basename_keys.append(os.path.basename(p[0]))
+                else:
+                    basename_keys.append(os.path.basename(p))
+            basename_counts = Counter([k for k in basename_keys if k is not None])
+
+            # Otherwise, save each frame as a separate file with original filename and extension (no _scaled, and prefix duplicates with folder name)
             for i, frame in enumerate(self.preview_viewer.frames):
                 use_original = i < len(original_paths) and original_paths[i] is not None
                 if use_original:
                     orig_path = original_paths[i]
                     if isinstance(orig_path, tuple):
                         # For GIFs, orig_path is (filepath, frame_index)
-                        orig_name, orig_ext = os.path.splitext(os.path.basename(orig_path[0]))
-                        frame_path = os.path.join(save_folder, f"{orig_name}_frame{orig_path[1]+1}{orig_ext}")
+                        base_name = os.path.basename(orig_path[0])
+                        orig_name, orig_ext = os.path.splitext(base_name)
+                        folder_name = os.path.basename(os.path.dirname(orig_path[0])) or ''
+                        # If basename duplicates exist, prefix with folder name
+                        prefix = f"{folder_name}_" if basename_counts.get(base_name, 0) > 1 and folder_name else ''
+                        frame_path = os.path.join(save_folder, f"{prefix}{orig_name}_frame{orig_path[1]+1}{orig_ext}")
                     else:
-                        orig_name, orig_ext = os.path.splitext(os.path.basename(orig_path))
-                        frame_path = os.path.join(save_folder, f"{orig_name}{orig_ext}")
+                        base_name = os.path.basename(orig_path)
+                        orig_name, orig_ext = os.path.splitext(base_name)
+                        folder_name = os.path.basename(os.path.dirname(orig_path)) or ''
+                        prefix = f"{folder_name}_" if basename_counts.get(base_name, 0) > 1 and folder_name else ''
+                        frame_path = os.path.join(save_folder, f"{prefix}{orig_name}{orig_ext}")
                 else:
                     frame_path = os.path.join(save_folder, f"frame_{i+1}.png")
                 frame_to_save = frame
@@ -1280,11 +1613,20 @@ class NewToolApp:
         img = frame.convert('RGBA')
         datas = img.getdata()
         newData = []
-        for item in datas:
-            if item[:3] == transparency_color:
-                newData.append((255, 255, 255, 0))
-            else:
-                newData.append(item)
+        ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
+        if ttol <= 0:
+            for item in datas:
+                if item[:3] == transparency_color:
+                    newData.append((item[0], item[1], item[2], 0))
+                else:
+                    newData.append(item)
+        else:
+            for item in datas:
+                r, g, b = item[:3]
+                if abs(r - transparency_color[0]) <= ttol and abs(g - transparency_color[1]) <= ttol and abs(b - transparency_color[2]) <= ttol:
+                    newData.append((r, g, b, 0))
+                else:
+                    newData.append(item)
         img.putdata(newData)
         return img
 
@@ -1453,7 +1795,8 @@ class NewToolApp:
                         for x in range(scaled_frame.width):
                             r, g, b, a = pixels[x, y]
                             if transparency_color_palette: # Use palette handler's color
-                                if a < 128 or (r, g, b) == transparency_color_palette:
+                                ttol = getattr(self.palette_handler, 'transparency_tolerance', 0)
+                                if a < 128 or (ttol > 0 and abs(r - transparency_color_palette[0]) <= ttol and abs(g - transparency_color_palette[1]) <= ttol and abs(b - transparency_color_palette[2]) <= ttol) or (ttol <= 0 and (r, g, b) == transparency_color_palette):
                                     pixels[x, y] = transparency_color_palette + (255,)
                                 else:
                                     pixels[x, y] = (r, g, b, 255)

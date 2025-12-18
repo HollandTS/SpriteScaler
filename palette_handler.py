@@ -37,7 +37,12 @@ class PaletteHandler:
         transparency_color = getattr(self, 'transparency_color', None)
         if transparency_color is not None:
             tcr, tcg, tcb = transparency_color
-            transparency_mask = (r == tcr) & (g == tcg) & (b == tcb)
+            ttol = int(getattr(self, 'transparency_tolerance', 0))
+            if ttol <= 0:
+                transparency_mask = (r == tcr) & (g == tcg) & (b == tcb)
+            else:
+                # Per-channel tolerance (L-inf distance)
+                transparency_mask = (np.abs(r - tcr) <= ttol) & (np.abs(g - tcg) <= ttol) & (np.abs(b - tcb) <= ttol)
             mask = mask & (~transparency_mask)
         # Flatten mask and indices for masked pixels
         idxs = np.where(mask)
@@ -108,6 +113,8 @@ class PaletteHandler:
         self.palette_colors = None  # numpy array of RGB colors
         self.palette_colors_lab = None  # LAB version of palette colors
         self.transparency_color = None
+        # Transparency tolerance in 0..255 (per-channel absolute tolerance)
+        self.transparency_tolerance = 0
         self.original_images = {}  # Store original images before palette application
         self.next_image_id = 0  # Counter for generating unique image IDs
         
@@ -199,7 +206,13 @@ class PaletteHandler:
                 alpha = img_data[:, :, 3]
                 
                 # Create mask for transparency color
-                is_transparent = np.all(rgb_data == self.transparency_color, axis=2)
+                ttol = int(getattr(self, 'transparency_tolerance', 0))
+                if ttol <= 0:
+                    is_transparent = np.all(rgb_data == self.transparency_color, axis=2)
+                else:
+                    # Per-channel tolerance
+                    diffs = np.abs(rgb_data.astype(int) - np.array(self.transparency_color, dtype=int))
+                    is_transparent = np.all(diffs <= ttol, axis=2)
                 alpha[is_transparent] = 0
                 
                 # Update image with new alpha channel

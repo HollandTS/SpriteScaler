@@ -12,13 +12,18 @@ def on_transparency_color_changed(app):
     color1 = getattr(app, 'outline_color1', None)
     color2 = getattr(app, 'outline_color2', None)
     transparency_color = getattr(app.palette_handler, 'transparency_color', None)
+    # Helper to compare colors with tolerance
+    def _within_tol(ca, cb, tol):
+        return abs(ca[0] - cb[0]) <= tol and abs(ca[1] - cb[1]) <= tol and abs(ca[2] - cb[2]) <= tol
+
+    ttol = int(getattr(app.palette_handler, 'transparency_tolerance', 0))
     # Update outline color1 canvas border
-    if color1 is not None and transparency_color is not None and tuple(color1) == tuple(transparency_color):
+    if color1 is not None and transparency_color is not None and _within_tol(color1, transparency_color, ttol):
         app.outline_color1_canvas.config(highlightbackground='#ff0000', highlightthickness=2)
     else:
         app.outline_color1_canvas.config(highlightbackground='#888888', highlightthickness=1)
     # Update outline color2 canvas border
-    if color2 is not None and transparency_color is not None and tuple(color2) == tuple(transparency_color):
+    if color2 is not None and transparency_color is not None and _within_tol(color2, transparency_color, ttol):
         app.outline_color2_canvas.config(highlightbackground='#ff0000', highlightthickness=2)
     else:
         app.outline_color2_canvas.config(highlightbackground='#888888', highlightthickness=1)
@@ -44,16 +49,21 @@ def restore_transparency_color(img, transparency_color):
     arr[..., 3][mask] = 255
     return Image.fromarray(arr, 'RGBA')
 
-def apply_transparency_color(img, transparency_color):
+def apply_transparency_color(img, transparency_color, tolerance=0):
     """Convert all pixels matching transparency_color to alpha=0 (transparent)."""
     # Ensure input image is RGBA
     if img.mode != 'RGBA':
         img = img.convert('RGBA')
     arr = np.array(img) # Already RGBA, no need for convert('RGBA') again
     rgb = arr[..., :3]
-    tc = np.array(transparency_color, dtype=np.uint8)
-    # Create mask for pixels that match the transparency color
-    mask = np.all(rgb == tc, axis=-1)
+    if transparency_color is None:
+        return img
+    tc = np.array(transparency_color, dtype=np.int16)
+    rgb_int = rgb.astype(np.int16)
+    if not tolerance:
+        mask = np.all(rgb_int == tc, axis=-1)
+    else:
+        mask = np.all(np.abs(rgb_int - tc) <= int(tolerance), axis=-1)
     arr[mask, 3] = 0 # Set alpha to 0 for those pixels
     return Image.fromarray(arr, 'RGBA')
 
@@ -108,8 +118,12 @@ def apply_outlining(app):
     if transparency_color is None:
         messagebox.showerror("Outlining Error", "You must set a transparency color before outlining. Use the 'Transparency Color' button to pick the background color of your sprite.")
         return
-    if tuple(color1) == tuple(transparency_color) or (use_gradient and tuple(color2) == tuple(transparency_color)):
-        messagebox.showerror("Outlining Error", "Outline color must not match the transparency color! Please pick a different outline color.")
+    # Consider transparency tolerance: if outline color is within tolerance of transparency color, it's effectively invisible
+    ttol = int(getattr(app.palette_handler, 'transparency_tolerance', 0))
+    def _within_tol(ca, cb, tol):
+        return abs(ca[0] - cb[0]) <= tol and abs(ca[1] - cb[1]) <= tol and abs(ca[2] - cb[2]) <= tol
+    if _within_tol(color1, transparency_color, ttol) or (use_gradient and _within_tol(color2, transparency_color, ttol)):
+        messagebox.showerror("Outlining Error", "Outline color must not match (within tolerance) the transparency color! Please pick a different outline color.")
         return
     # Robustly get amount and thickness, fallback to defaults if blank/invalid
     try:
@@ -145,7 +159,8 @@ def apply_outlining(app):
             if app._cancel_apply_outline:
                 break
             # Step 1: Make original transparency color transparent (alpha 0)
-            frame_for_outline = apply_transparency_color(frame, transparency_color)
+            ttol = int(getattr(app.palette_handler, 'transparency_tolerance', 0))
+            frame_for_outline = apply_transparency_color(frame, transparency_color, ttol)
             # Step 2: Pad the image with a transparent border
             padded = pad_image_with_transparent_border(frame_for_outline, border=2)
             # Step 3: Apply outlining. This should return an RGBA image where only sprite+outline are opaque.
