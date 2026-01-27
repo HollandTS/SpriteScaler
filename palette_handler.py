@@ -14,25 +14,25 @@ class PaletteHandler:
         from PIL import Image
         arr = np.array(img.convert('RGBA'))
         r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
-        # Convert image and target color to HSV
-        rgb_img = np.stack([r, g, b], axis=-1).astype(np.float32) / 255.0
-        hsv_img = color.rgb2hsv(rgb_img)
+        
+        # Use RGB component distance for color selection (Photoshop-style)
+        # This selects colors based on how close each component is
         tr, tg, tb = target_color
-        target_rgb = np.array([[tr / 255.0, tg / 255.0, tb / 255.0]])
-        target_hsv = color.rgb2hsv(target_rgb)[0]
-        # Compute hue distance (circular)
-        hue_img = hsv_img[..., 0] * 360.0
-        target_hue = target_hsv[0] * 360.0
-        hue_dist = np.abs(hue_img - target_hue)
-        hue_dist = np.minimum(hue_dist, 360.0 - hue_dist)  # wraparound
-        # Optionally, also check S/V distance (less important, but helps with edge cases)
-        sat_img = hsv_img[..., 1]
-        val_img = hsv_img[..., 2]
-        sat_dist = np.abs(sat_img - target_hsv[1])
-        val_dist = np.abs(val_img - target_hsv[2])
-        # Main mask: within hue tolerance (tolerance is in degrees, 0-1000 maps to 0-180)
-        hue_tol = np.clip(tolerance, 0, 1000) * 0.18  # 0-180 degrees
-        mask = (hue_dist <= hue_tol) & (sat_dist < 0.4) & (val_dist < 0.4)
+        r_dist = np.abs(r.astype(np.float32) - tr)
+        g_dist = np.abs(g.astype(np.float32) - tg)
+        b_dist = np.abs(b.astype(np.float32) - tb)
+        
+        # Map tolerance (0-1000 slider) to component threshold
+        # Use exponential/curved mapping so tolerance feels more natural:
+        # tolerance=0 -> threshold=0
+        # tolerance=30 -> threshold~50 (selects dark grays from black)
+        # tolerance=100 -> threshold~100
+        # tolerance=1000 -> threshold=255 (all colors)
+        tolerance_norm = np.clip(tolerance, 0, 1000) / 1000.0
+        component_tolerance = tolerance_norm * 255.0
+        
+        # Mask: all color components must be within tolerance
+        mask = (r_dist <= component_tolerance) & (g_dist <= component_tolerance) & (b_dist <= component_tolerance)
         # If a transparency color is set, exclude those pixels from the mask
         transparency_color = getattr(self, 'transparency_color', None)
         if transparency_color is not None:
